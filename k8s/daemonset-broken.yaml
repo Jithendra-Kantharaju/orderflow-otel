@@ -25,12 +25,17 @@ metadata:
 spec:
   selector:
     matchLabels:
-      app: node-telemetry
+      app: node-telemetry-agent
   template:
     metadata:
       labels:
         app: node-telemetry-agent
     spec:
+      hostPID: true
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
       containers:
         - name: node-telemetry-agent
           image: canyoncode/node-telemetry-agent:1.4.2

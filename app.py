@@ -22,6 +22,8 @@ from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+from opentelemetry import context as otel_context
+
 app = FastAPI(title="orderflow")
 
 executor = ThreadPoolExecutor(max_workers=4)
@@ -47,7 +49,7 @@ from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExp
 from opentelemetry.sdk.resources import Resource
 
 # Optional but good practice: tag every span/metric with a service name
-resource = Resource.create({"service.name": "SOME_SERVICE_NAME"})
+resource = Resource.create({"service.name": "orderflow"})
 
 # --- traces ---
 span_exporter = OTLPSpanExporter(endpoint="localhost:4317", insecure=True)
@@ -64,8 +66,8 @@ metrics.set_meter_provider(meter_provider)
 meter = metrics.get_meter(__name__)
 
 # --- one counter, one histogram ---
-some_counter = meter.create_counter("SOME_NAME", description="...")
-some_histogram = meter.create_histogram("SOME_NAME", description="...", unit="ms")
+requests_counter = meter.create_counter("orderflow.requests.total", description="Total requests processed")
+call_duration_histogram = meter.create_histogram("orderflow.call.duration", description="Duration of downstream/step calls", unit="ms")
 
 class OrderRequest(BaseModel):
     item: str
@@ -99,24 +101,29 @@ def create_order(req: OrderRequest):
         amount = round(req.qty * random.uniform(5, 50), 2)
 
         try:
+            start_time = time.time()
             with tracer.start_as_current_span("call_payment_service") as payment_span:
                 payment_span.set_attribute("order.id", order_id)
                 result = call_payment_service(order_id, amount)
+            elapsed_ms = (time.time() - start_time) * 1000
+            call_duration_histogram.record(elapsed_ms, {"endpoint": "orders"})
         except RuntimeError as e:
             span.record_exception(e)
             span.set_status(trace.Status(trace.StatusCode.ERROR, str(e)))
             raise HTTPException(status_code=502, detail=str(e))
 
+        requests_counter.add(1, {"endpoint": "orders"})
         return {"order_id": order_id, "item": req.item, "qty": req.qty, "payment": result}
-    order_id = f"ord_{random.randint(1000, 9999)}"
-    amount = round(req.qty * random.uniform(5, 50), 2)
 
+
+def run_tool_call_with_context(query: str, ctx):
+    token = otel_context.attach(ctx)
     try:
-        result = call_payment_service(order_id, amount)
-    except RuntimeError as e:
-        raise HTTPException(status_code=502, detail=str(e))
-
-    return {"order_id": order_id, "item": req.item, "qty": req.qty, "payment": result}
+        with tracer.start_as_current_span("tool_call") as span:
+            span.set_attribute("tool.query", query)
+            return run_tool_call(query)
+    finally:
+        otel_context.detach(token)
 
 
 def run_tool_call(query: str) -> dict:
@@ -141,30 +148,37 @@ def run_model_inference(context: dict) -> dict:
 
 @app.post("/agent/analyze")
 def agent_analyze(req: AgentRequest):
-    # TODO(3): This is the interesting one. Instrument this as a
-    # WORKFLOW made of distinct steps (plan -> tool_call -> model_inference),
-    # each as its own span/sub-span, with the tool_call step running on a
-    # background thread via `executor` (already wired up below).
-    #
-    # Make sure trace context survives the hop onto the thread pool —
-    # by default it will NOT propagate automatically. Record token counts
-    # from run_model_inference as span attributes (and/or a metric) —
-    # this is the same kind of signal Canyon Code uses to attribute
-    # cost to individual agent runs.
-    plan = {"steps": ["tool_call", "model_inference"], "query": req.query}
+    with tracer.start_as_current_span("agent_analyze") as workflow_span:
+        workflow_span.set_attribute("agent.workflow", "plan_tool_model")
+        
+        with tracer.start_as_current_span("plan") as plan_span:
+            plan = {"steps": ["tool_call", "model_inference"], "query": req.query}
+            plan_span.set_attribute("agent.query", req.query)
 
-    future = executor.submit(run_tool_call, req.query)
-    tool_result = future.result()
+        current_ctx = otel_context.get_current()
+        start_time = time.time()
+        future = executor.submit(run_tool_call_with_context, req.query, current_ctx)
+        tool_result = future.result()
+        tool_elapsed_ms = (time.time() - start_time) * 1000
+        call_duration_histogram.record(tool_elapsed_ms, {"endpoint": "agent_analyze"})
 
-    model_result = run_model_inference(tool_result)
+        start_time = time.time()
+        with tracer.start_as_current_span("model_inference") as inference_span:
+            model_result = run_model_inference(tool_result)
+            inference_span.set_attribute("llm.input_tokens", model_result["input_tokens"])
+            inference_span.set_attribute("llm.output_tokens", model_result["output_tokens"])
+            inference_span.set_attribute("llm.model", model_result["model"])
+        inference_elapsed_ms = (time.time() - start_time) * 1000
+        call_duration_histogram.record(inference_elapsed_ms, {"endpoint": "agent_analyze"})
 
-    return {
-        "query": req.query,
-        "plan": plan,
-        "tool_result": tool_result,
-        "answer": model_result["answer"],
-        "usage": {
-            "input_tokens": model_result["input_tokens"],
-            "output_tokens": model_result["output_tokens"],
-        },
-    }
+        requests_counter.add(1, {"endpoint": "agent_analyze"})
+        return {
+            "query": req.query,
+            "plan": plan,
+            "tool_result": tool_result,
+            "answer": model_result["answer"],
+            "usage": {
+                "input_tokens": model_result["input_tokens"],
+                "output_tokens": model_result["output_tokens"],
+            },
+        }

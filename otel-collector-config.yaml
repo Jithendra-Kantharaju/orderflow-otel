@@ -1,0 +1,55 @@
+# Partial OpenTelemetry Collector config.
+#
+# The `orderflow` app will send OTLP traces + metrics to this Collector
+# on localhost:4317. Your job is to finish the pipeline.
+#
+# Already done for you: the receiver, and a memory_limiter so a runaway
+# app can't OOM the Collector.
+#
+# TODO(4): add a `batch` processor (traces and metrics should not be
+#   exported one-by-one).
+# TODO(5): add ONE processor that reduces volume or cost in some way —
+#   your choice, but be ready to explain the tradeoff in your written
+#   answers. Reasonable options: a `filter` processor that drops
+#   health-check spans, or a `probabilistic_sampler` on traces.
+# TODO(6): wire your new processors into the `service.pipelines` section
+#   below, in the order that makes sense.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 200
+    spike_limit_mib: 50
+
+  # TODO(4): batch:
+  #   ...
+
+  # TODO(5): your volume/cost-control processor:
+  #   ...
+
+exporters:
+  logging:
+    verbosity: detailed
+
+  prometheus:
+    endpoint: 0.0.0.0:8889
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter]  # TODO(6): add your processors here, in order
+      exporters: [logging]
+
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter]  # TODO(6): add your processors here, in order
+      exporters: [prometheus]

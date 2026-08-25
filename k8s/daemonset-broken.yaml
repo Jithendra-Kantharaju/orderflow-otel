@@ -1,0 +1,51 @@
+# node-telemetry-daemonset.yaml
+#
+# Intent: deploy `node-telemetry-agent` as a DaemonSet so it runs on
+# EVERY node in the cluster -- control-plane nodes included, since the
+# whole point is fleet-wide CPU/scheduler visibility -- and exports
+# host-level telemetry (cgroup throttling, run-queue latency) by reading
+# /proc and /sys directly, in the vein of a node-exporter or eBPF
+# scheduler exporter sidecar.
+#
+# This manifest was written in a hurry and has real problems in it: at
+# least one that means it will never schedule a single pod, and at
+# least two more that are silent -- they run, they look fine in `kubectl
+# get pods`, and they're still wrong. Find them and fix them. You do
+# NOT need a running cluster to do this exercise -- reasoning about the
+# spec is the point. If you do have kind/minikube handy, feel free to
+# validate with `kubectl apply --dry-run=client -f daemonset-broken.yaml`
+# and include the output, but it's optional.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-telemetry-agent
+  namespace: observability
+  labels:
+    app: node-telemetry-agent
+spec:
+  selector:
+    matchLabels:
+      app: node-telemetry
+  template:
+    metadata:
+      labels:
+        app: node-telemetry-agent
+    spec:
+      containers:
+        - name: node-telemetry-agent
+          image: canyoncode/node-telemetry-agent:1.4.2
+          ports:
+            - containerPort: 9464
+              name: metrics
+          volumeMounts:
+            - name: proc
+              mountPath: /host/proc
+            - name: sys
+              mountPath: /host/sys
+      volumes:
+        - name: proc
+          hostPath:
+            path: /proc
+        - name: sys
+          hostPath:
+            path: /sys

@@ -91,10 +91,23 @@ def health():
 
 @app.post("/orders")
 def create_order(req: OrderRequest):
-    # TODO(2): Wrap this handler in a span. Add a CHILD span around the
-    # call to call_payment_service that captures it as a distinct step
-    # in the trace. Record order attributes as SPAN attributes (not
-    # metric labels) — item name and qty are fine here.
+    with tracer.start_as_current_span("create_order") as span:
+        span.set_attribute("order.item", req.item)
+        span.set_attribute("order.qty", req.qty)
+
+        order_id = f"ord_{random.randint(1000, 9999)}"
+        amount = round(req.qty * random.uniform(5, 50), 2)
+
+        try:
+            with tracer.start_as_current_span("call_payment_service") as payment_span:
+                payment_span.set_attribute("order.id", order_id)
+                result = call_payment_service(order_id, amount)
+        except RuntimeError as e:
+            span.record_exception(e)
+            span.set_status(trace.Status(trace.StatusCode.ERROR, str(e)))
+            raise HTTPException(status_code=502, detail=str(e))
+
+        return {"order_id": order_id, "item": req.item, "qty": req.qty, "payment": result}
     order_id = f"ord_{random.randint(1000, 9999)}"
     amount = round(req.qty * random.uniform(5, 50), 2)
 

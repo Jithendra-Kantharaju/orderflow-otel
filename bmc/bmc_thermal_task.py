@@ -31,8 +31,18 @@ from pathlib import Path
 
 
 def parse_redfish_thermal(payload: dict) -> list[dict]:
-    # TODO: implement
-    raise NotImplementedError
+    readings = []
+    for sensor in payload["Temperatures"]:
+        reading = sensor["ReadingCelsius"]
+        threshold = sensor["UpperThresholdCritical"]
+        readings.append({
+            "sensor": sensor["Name"],
+            "reading_celsius": reading,
+            "critical_threshold": threshold,
+            "over_critical_threshold": reading >= threshold,
+            "health": sensor["Status"]["Health"],
+        })
+    return readings
 
 
 if __name__ == "__main__":

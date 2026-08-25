@@ -50,115 +50,78 @@ For naming, use a consistent convention like `workflow.{workflow_name}.{step_nam
 
 ## 5. DaemonSet Bugs
 
-The `node-telemetry-agent` DaemonSet manifest had three bugs: one that prevents pods from running at all, and two silent failures that look correct but are fundamentally broken. Here's the summary:
-
-### Bug Summary
-
-| Bug | Type | Visible? | Impact | Fix |
-|-----|------|----------|--------|-----|
-| **Selector/label mismatch** | Critical | ✅ Immediately visible | DaemonSet: 0/0 desired/ready, no pods run | Change `spec.selector.matchLabels.app` from `node-telemetry` to `node-telemetry-agent` |
-| **Missing tolerations** | Silent | ❌ Pods look fine on workers | Silently skips all control-plane nodes (breaks fleet-wide coverage) | Add `tolerations` for `node-role.kubernetes.io/control-plane:NoSchedule` |
-| **Missing `hostPID: true`** | Silent | ❌ Pod runs without errors | Container sees its own PID namespace, not host's (metrics are wrong) | Add `hostPID: true` to pod spec |
-
----
+The `node-telemetry-agent` DaemonSet manifest had three bugs: one that prevents pods from running at all, and two silent failures that look correct but are fundamentally broken.
 
 ### Bug #1: Selector/Label Mismatch (CRITICAL)
 
-**The problem:**
-```yaml
-spec:
-  selector:
-    matchLabels:
-      app: node-telemetry          # doesn't match pod label
-  template:
-    metadata:
-      labels:
-        app: node-telemetry-agent  # pod has different label
-```
+The selector said `app: node-telemetry` but the pod template had `app: node-telemetry-agent`. A DaemonSet uses its selector to find and manage pods, so when they don't match, Kubernetes can't associate them. Result: `kubectl get daemonsets` shows 0 desired, 0 ready — not a single pod runs. This is immediately visible because nothing happens.
 
-A DaemonSet uses its selector to find and manage pods. If the selector doesn't match the pod labels, Kubernetes can't associate them. The result is immediate and obvious: `kubectl get daemonsets` shows 0 desired, 0 ready, 0 available — not a single pod runs. This is the one bug you catch immediately because nothing happens.
-
-**The fix:**
-Change `spec.selector.matchLabels.app` to `node-telemetry-agent` so it matches the pod template's label. Once they match, Kubernetes can associate the pods with the DaemonSet.
+**The fix:** Change `spec.selector.matchLabels.app` to `node-telemetry-agent` to match the pod label.
 
 ---
 
 ### Bug #2: Missing Tolerations (SILENT)
 
-**The problem:**
-The manifest comment says "run on EVERY node in the cluster -- control-plane nodes included." But control-plane nodes have a built-in taint: `node-role.kubernetes.io/control-plane:NoSchedule`. Without a matching toleration, the DaemonSet will skip all control-plane nodes entirely.
+The manifest comment says "run on EVERY node in the cluster -- control-plane nodes included," but there were no tolerations for the control-plane taint. Control-plane nodes have `node-role.kubernetes.io/control-plane:NoSchedule` by default, which blocks regular pods. Without a toleration, the DaemonSet silently skips all control-plane nodes entirely. Worker nodes get pods just fine, so `kubectl get pods` looks correct, but you're missing control-plane instrumentation.
 
+**The fix:** Add a toleration:
 ```yaml
-spec:
-  # No tolerations — this means control-plane taint will block scheduling
-  containers:
-    - name: node-telemetry-agent
+tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
 ```
-
-This is a silent failure: worker nodes get pods just fine, so `kubectl get pods` looks correct. But you're missing control-plane instrumentation, which defeats the purpose of fleet-wide telemetry. You won't notice until you specifically look for pods on control-plane nodes.
-
-**The fix:**
-Add a toleration to override the control-plane taint:
-```yaml
-spec:
-  tolerations:
-    - key: node-role.kubernetes.io/control-plane
-      operator: Exists
-      effect: NoSchedule
-  containers:
-    - name: node-telemetry-agent
-```
-
-This says "tolerate the control-plane:NoSchedule taint," allowing pods to schedule there.
 
 ---
 
 ### Bug #3: Missing `hostPID: true` (SILENT)
 
-**The problem:**
-The container has `hostPath` mounts to `/proc` and `/sys`, which give it filesystem access to the host's state. But Kubernetes also runs each container in its own PID namespace by default. This means when the agent reads `/proc`, it sees **its own container's processes**, not the host's entire process table.
+The container had `hostPath` mounts to `/proc` and `/sys`, but no `hostPID: true`. This means the container ran in its own PID namespace, so when it read `/proc`, it saw only its own container's processes, not the host's entire process table. The agent ran without errors, logs looked normal, but the data was useless — it was collecting metrics for a single container, not the entire node.
 
-```yaml
-spec:
-  # No hostPID: true — container is isolated in its own PID namespace
-  containers:
-    - name: node-telemetry-agent
-      volumeMounts:
-        - name: proc
-          mountPath: /host/proc  # Can read these files...
-        - name: sys
-          mountPath: /host/sys   # ... but in wrong namespace
-  volumes:
-    - name: proc
-      hostPath:
-        path: /proc
-```
-
-The agent runs without errors. Logs look normal. But its data is useless — it's collecting CPU, scheduler, and process metrics for a single container, not the entire node. This is exactly the kind of silent failure that's hardest to debug: the pod looks healthy, but the metrics are completely wrong.
-
-**The fix:**
-Add `hostPID: true` to the pod spec:
-```yaml
-spec:
-  hostPID: true  # Container now sees host's PID namespace
-  tolerations:
-    - key: node-role.kubernetes.io/control-plane
-      operator: Exists
-      effect: NoSchedule
-  containers:
-    - name: node-telemetry-agent
-      volumeMounts:
-        - name: proc
-          mountPath: /host/proc  # Now sees HOST's processes
-```
-
-`hostPID: true` disables namespace isolation, so the container sees the host's full process table. Combined with the `hostPath` mounts, the agent now has true host visibility.
+**The fix:** Add `hostPID: true` to the pod spec so the container sees the host's full process table.
 
 ---
 
-## Key Insights
+## 6. Redfish vs. IPMI
 
-1. **Selector/label mismatches are obvious failures** — DaemonSet 0/0 is immediately visible, so you catch this quickly.
-2. **Tolerations and namespacing are silent failures** — pods run fine, everything looks correct, but you're missing data or seeing wrong data. These require careful reasoning to catch.
-3. **Namespace isolation is orthogonal to volume mounts** — giving a container access to host files (`hostPath`) doesn't automatically give it host visibility; you need to disable namespace isolation (`hostPID`, `hostNetwork`) depending on what you're measuring.
-4. **Test your declared intent** — the comment says "EVERY node including control-plane" — that's your spec to verify against. If the implementation doesn't match the comment, it's a bug.
+### Why out-of-band monitoring instead of a host-OS agent
+
+A host-OS agent reading `/sys` thermal zones only works if the OS is running and healthy. When the kernel hangs, fails to boot, or the main board loses power, the OS agent goes silent and you lose visibility exactly when you need it. A BMC is a completely separate processor with its own network port and often its own standby power, so it monitors the host even when it's completely down — you get thermal data, power state, and hardware health when the operating system is the problem, not just when it's running smoothly.
+
+### When to use IPMI over Redfish
+
+Redfish is newer and cleaner (JSON, REST, structured schemas), but IPMI is older and universally supported across hardware generations. If you're managing a fleet with mixed hardware ages — old servers from a decade ago alongside newer stuff — IPMI will work everywhere while Redfish might only exist on recent models. IPMI is primitive (raw byte codes), but universal support often wins in heterogeneous infrastructure.
+
+---
+
+## 7. CentOS vs. Ubuntu, same systemd unit file
+
+### Package manager and library paths
+
+CentOS/RHEL use `dnf`/`yum` and RPM, while Ubuntu uses `apt` and `.deb`. A systemd service that depends on a library might work fine on Ubuntu because the `.deb` installs it in a standard path, but fail on CentOS if the RPM version is different or installed elsewhere. The same binary and same systemd unit file can't find its dependencies.
+
+### SELinux enforcement
+
+CentOS/RHEL have SELinux enforcing by default, while Ubuntu uses AppArmor or has it disabled. A service that runs fine on Ubuntu might be silently denied file access, network operations, or specific syscalls on CentOS by SELinux policy. The service starts without obvious errors, but syscalls get blocked, causing subtle failures or hangs.
+
+---
+
+## 8. Diagnosing a slow node, no monitoring installed
+
+### CPU load and run-queue: `uptime` or `top`
+
+`uptime` shows 1/5/15-minute load averages. If load is 20 on a 4-core machine, the CPU is saturated and tasks are queuing. `top` breaks it down per-process so you see which process (or few) are burning CPU.
+
+### Memory pressure: `free -h`
+
+Shows total, used, and available memory. If available is near zero and swap is being used heavily, memory pressure is cascading I/O latency across the system. Pages are being evicted to disk, causing slowness everywhere.
+
+### Disk I/O bottleneck: `iostat -x` or `iotop`
+
+`iostat -x` shows I/O utilization per device and latency metrics (`await`). If utilization is near 100% or await is high, disk is the bottleneck. `iotop` shows which processes are doing the I/O, pinpointing the culprit.
+
+### Per-process memory breakdown: `ps aux | sort -k4 -nr`
+
+Shows which processes use the most memory. If one process is using 80% of RAM, it's either the problem or it's causing memory pressure that cascades to everything else.
+
+---

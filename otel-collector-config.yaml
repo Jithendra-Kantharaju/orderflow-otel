@@ -29,11 +29,12 @@ processors:
     limit_mib: 200
     spike_limit_mib: 50
 
-  # TODO(4): batch:
-  #   ...
+  batch:
+    timeout: 5s
+    send_batch_size: 100
 
-  # TODO(5): your volume/cost-control processor:
-  #   ...
+  probabilistic_sampler:
+    sampling_percentage: 50
 
 exporters:
   logging:
@@ -46,10 +47,10 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [memory_limiter]  # TODO(6): add your processors here, in order
+      processors: [memory_limiter, probabilistic_sampler, batch]
       exporters: [logging]
 
     metrics:
       receivers: [otlp]
-      processors: [memory_limiter]  # TODO(6): add your processors here, in order
+      processors: [memory_limiter, batch]
       exporters: [prometheus]

@@ -110,9 +110,10 @@ def create_order(req: OrderRequest):
         except RuntimeError as e:
             span.record_exception(e)
             span.set_status(trace.Status(trace.StatusCode.ERROR, str(e)))
+            requests_counter.add(1, {"endpoint": "orders", "status": "error"})
             raise HTTPException(status_code=502, detail=str(e))
 
-        requests_counter.add(1, {"endpoint": "orders"})
+        requests_counter.add(1, {"endpoint": "orders", "status": "success"})
         return {"order_id": order_id, "item": req.item, "qty": req.qty, "payment": result}
 
 
@@ -171,7 +172,7 @@ def agent_analyze(req: AgentRequest):
         inference_elapsed_ms = (time.time() - start_time) * 1000
         call_duration_histogram.record(inference_elapsed_ms, {"endpoint": "agent_analyze"})
 
-        requests_counter.add(1, {"endpoint": "agent_analyze"})
+        requests_counter.add(1, {"endpoint": "agent_analyze", "status": "success"})
         return {
             "query": req.query,
             "plan": plan,

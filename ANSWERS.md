@@ -125,3 +125,7 @@ Shows total, used, and available memory. If available is near zero and swap is b
 Shows which processes use the most memory. If one process is using 80% of RAM, it's either the problem or it's causing memory pressure that cascades to everything else.
 
 ---
+
+## Reflection: What I'd Do Differently
+
+Looking back at the instrumentation in Part 2, I recorded call duration on the histogram only for successful payment calls, but payment failures (RuntimeError) still happened — they just weren't captured in the latency histogram. In a real system, failed calls often have interesting latency patterns (timeout waiting, retry delays) that are invisible if you only histogram the happy path. I'd record duration for all calls (success and failure) with a status attribute, so the histogram captures the full picture of what's happening, not just the requests that worked.
